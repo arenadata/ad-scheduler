@@ -1,0 +1,22 @@
+# Minimal KubeSchedulerConfiguration for ad-scheduler (M0).
+#
+# One profile, scheduler-name "ad-scheduler", with the no-op AdCapacity plugin
+# added to the default filter plugins so the binary schedules under default
+# framework logic plus our plugin. NodeResourcesFit stays ENABLED in M0 — it is
+# disabled at M2 once AdCapacity performs real headroom fitting.
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+leaderElection:
+  leaderElect: true
+  resourceName: ad-scheduler
+  resourceNamespace: ad-system
+profiles:
+  - schedulerName: ad-scheduler
+    plugins:
+      filter:
+        enabled:
+          - name: AdCapacity
+    # M0: AdCapacity carries no args. M2 wires the queue tree / node pool here.
+    pluginConfig:
+      - name: AdCapacity
+        args: {}

@@ -1,0 +1,188 @@
+# In-tree admission policy (decision q22 — no external webhook). A
+# ValidatingAdmissionPolicy rejects obviously-invalid Queue CRs at apply time,
+# so operators get immediate feedback instead of the reconciler silently
+# quarantining the node. It enforces a subset of the engine's own invariants
+# (config.Validate) — the design contract is VAP-accept ⊆ engine-accept, so the
+# engine remains the source of truth and the VAP never accepts what the engine
+# would reject. Full codegen of the CEL from the engine rules is a later step.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ad-scheduler-queue-invariants
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["scheduling.arenadata.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["queues"]
+  validations:
+    # BEGIN generated from pkg/admission.QueueRules (single source; the engine's
+    # controller/queue runs the equivalent Go predicates fail-closed — the
+    # TestVAPInSyncWithRules test fails if this block drifts from the rules).
+    - expression: "!has(object.spec.parent) || object.spec.parent != object.metadata.name"
+      message: "a Queue cannot be its own parent"
+    - expression: "!has(object.spec.parent) || !object.spec.parent.contains('.')"
+      message: "spec.parent must be a bare Queue name in the same namespace (no dots)"
+    - expression: "!has(object.spec.capacityMode) || object.spec.capacityMode == 'absolute'"
+      message: "only capacityMode=absolute is supported in the MVP (decision q13)"
+    - expression: "!has(object.spec.serviceAccounts) || object.spec.serviceAccounts.all(sa, sa != 'default')"
+      message: "the default ServiceAccount must not be mapped to a queue (decision q21)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ad-scheduler-queue-invariants
+spec:
+  policyName: ad-scheduler-queue-invariants
+  validationActions: ["Deny"]
+---
+# In-tree MutatingAdmissionPolicy (decision q22 / G7). Instead of an external
+# webhook, this stamps the pool nodeSelector + the dedicated-pool toleration onto
+# pods that opt in the standard Kubernetes way — by targeting this scheduler with
+# spec.schedulerName: ad-scheduler. The operator sets that field on batch pods
+# ONLY, so the scheduler's own control plane (which never targets this scheduler)
+# is not dragged onto the pool (G7). There is no separate opt-in label: choosing
+# the scheduler and getting placed on its pool are one and the same decision.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: ad-scheduler-inject
+spec:
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    # BEGIN generated from pkg/admission.GenerateMAP (.Trigger) — the pod allow-list.
+    # TestMAPInSyncWithConfig fails if this drifts from the node-pool config.
+    # Fire only for pods that explicitly target this scheduler (choosing the
+    # scheduler is the opt-in, decision q22/G7); the apiserver has already
+    # defaulted schedulerName by the mutating phase.
+    - name: targets-ad-scheduler
+      expression: "has(object.spec.schedulerName) && object.spec.schedulerName == 'ad-scheduler'"
+    # END generated
+  mutations:
+    # BEGIN generated from pkg/admission.GenerateMAP (.Mutation) — pool nodeSelector
+    # + dedicated toleration, rendered from the node-pool label/value/taint (single
+    # source; TestMAPInSyncWithConfig fails if this block drifts). The nodeSelector
+    # merge preserves any selector the pod already carries (JSONPatch escapes '/' in
+    # the key as '~1'; add on an existing key is a replace, so it is idempotent).
+    # The pool toleration is appended only if not already present, else a new list.
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >
+          (
+            has(object.spec.nodeSelector)
+              ? [JSONPatch{op: "add", path: "/spec/nodeSelector/scheduler.arenadata.io~1name", value: "ad-scheduler"}]
+              : [JSONPatch{op: "add", path: "/spec/nodeSelector", value: {"scheduler.arenadata.io/name": "ad-scheduler"}}]
+          ) + (
+            has(object.spec.tolerations)
+              ? (object.spec.tolerations.exists(t, t.key == "scheduler.arenadata.io/dedicated" && t.operator == "Exists" && t.effect == "NoSchedule")
+                  ? []
+                  : [JSONPatch{op: "add", path: "/spec/tolerations/-", value: {"key": "scheduler.arenadata.io/dedicated", "operator": "Exists", "effect": "NoSchedule"}}])
+              : [JSONPatch{op: "add", path: "/spec/tolerations", value: [{"key": "scheduler.arenadata.io/dedicated", "operator": "Exists", "effect": "NoSchedule"}]}]
+          )
+    # END generated
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: ad-scheduler-inject
+spec:
+  policyName: ad-scheduler-inject
+---
+# Companion VAP (decision q20/q22): the dedicated pool is single-scheduler. A pod
+# may carry the pool nodeSelector or tolerate the dedicated taint ONLY if it is
+# scheduled by ad-scheduler — otherwise a pod bound by the default scheduler could
+# land on pool nodes outside our per-queue accounting. The MAP stamps exactly
+# these fields on pods that target this scheduler, so our own pods always pass;
+# only a pod that wants the pool WITHOUT targeting us is rejected (closing the
+# "taint / pool-label ⇒ schedulerName" loop). DaemonSet pods (CNI/CSI/kube-proxy)
+# and system namespaces are exempt — they legitimately run on every node.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ad-scheduler-pool-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "kube-node-lease", "kube-public"]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    # BEGIN generated from pkg/admission.GeneratePoolGuard (.ExemptDaemonSet) —
+    # TestPoolGuardInSyncWithConfig fails if this drifts.
+    - name: exempt-daemonset
+      expression: "!(has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, o.kind == 'DaemonSet'))"
+    # END generated
+  variables:
+    # BEGIN generated from pkg/admission.GeneratePoolGuard (.WantsPool) — true when
+    # a pod pins the pool nodeSelector value or tolerates the dedicated taint.
+    - name: wantsPool
+      expression: "(has(object.spec.nodeSelector) && 'scheduler.arenadata.io/name' in object.spec.nodeSelector && object.spec.nodeSelector['scheduler.arenadata.io/name'] == 'ad-scheduler') || (has(object.spec.tolerations) && object.spec.tolerations.exists(t, has(t.key) && t.key == 'scheduler.arenadata.io/dedicated'))"
+    # END generated
+  validations:
+    # BEGIN generated from pkg/admission.GeneratePoolGuard (.Validation/.Message).
+    - expression: "!variables.wantsPool || (has(object.spec.schedulerName) && object.spec.schedulerName == 'ad-scheduler')"
+      message: "a pod that targets the ad-scheduler dedicated pool (its nodeSelector or dedicated toleration) must set spec.schedulerName: ad-scheduler"
+    # END generated
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ad-scheduler-pool-guard
+spec:
+  policyName: ad-scheduler-pool-guard
+  validationActions: ["Deny"]
+---
+# Named-ServiceAccount guard (decision q21 / gaps G1-G2): a pod scheduled by
+# ad-scheduler must use a NAMED ServiceAccount. The `default` SA maps to no queue
+# (the Queue VAP bans it from spec.serviceAccounts), so such a pod could never be
+# admitted — placement fail-closes it to Pending. Reject it at admission for clear
+# feedback. Gated by the same schedulerName opt-in as the MAP/pool-guard (per-pod
+# opt-in, decision G7), so non-batch pods using the default SA elsewhere are
+# untouched.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ad-scheduler-named-sa
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    # BEGIN generated from pkg/admission.GenerateSAGuard (.Trigger) — the pod
+    # opt-in gate. TestSAGuardInSyncWithConfig fails if this drifts.
+    - name: targets-ad-scheduler
+      expression: "has(object.spec.schedulerName) && object.spec.schedulerName == 'ad-scheduler'"
+    # END generated
+  validations:
+    # BEGIN generated from pkg/admission.GenerateSAGuard (.Validation/.Message).
+    - expression: "object.spec.serviceAccountName != 'default' && object.spec.serviceAccountName != ''"
+      message: "a pod scheduled by ad-scheduler must use a named ServiceAccount — the default SA maps to no queue (decision q21); set spec.serviceAccountName"
+    # END generated
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ad-scheduler-named-sa
+spec:
+  policyName: ad-scheduler-named-sa
+  validationActions: ["Deny"]

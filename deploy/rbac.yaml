@@ -1,0 +1,146 @@
+# RBAC for ad-scheduler.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ad-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ad-scheduler
+  namespace: ad-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ad-scheduler
+rules:
+  # Read the pods/nodes the scheduler places, and the objects Filter/Bind need.
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "persistentvolumes", "persistentvolumeclaims", "replicationcontrollers", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    # engine reads the per-namespace envelope (q27); create is for the opt-in
+    # count-only DoS-guard quota (AD_AUTO_COUNT_QUOTA, off by default).
+    verbs: ["get", "list", "watch", "create"]
+  # Owner-ref workloads the framework's topology/affinity informers watch.
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # Dynamic Resource Allocation objects the in-tree DynamicResources plugin
+  # watches — and the ResourceClaims it must update (finalizer + allocation).
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceclaimtemplates", "resourceslices", "deviceclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceclaims/status", "resourceclaims/binding"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  # Bind pods and record events.
+  - apiGroups: [""]
+    resources: ["pods/binding", "bindings"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch"]
+  # Evict victims for queue reclaim/preemption (M5).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  # Our CRDs (queue tree + gang). controller/queue writes status; M2/M4.
+  - apiGroups: ["scheduling.arenadata.io"]
+    resources: ["queues", "queues/status", "podgroups", "podgroups/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Autoscaler gang-demand publisher (opt-in AD_AUTOSCALE_DEMAND): create/manage
+  # ProvisioningRequests + their backing PodTemplates for admitted-but-unplaceable
+  # gangs. Harmless if the feature is off (no objects are created).
+  - apiGroups: ["autoscaling.x-k8s.io"]
+    resources: ["provisioningrequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["podtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ad-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: ad-scheduler
+    namespace: ad-system
+---
+# Delegated authn/authz for the scheduler's own serving endpoints (/metrics,
+# /readyz authz): lets it create token/subjectaccess reviews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-scheduler-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: ad-scheduler
+    namespace: ad-system
+---
+# Leader-election lease lives in the scheduler's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ad-scheduler-extension-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: ad-scheduler
+    namespace: ad-system
+---
+# Operator-facing gang RBAC (decision G10, TODO §10.3): the canonical ClusterRole
+# an operator / provider-installer binds ITS ServiceAccount to so it can create and
+# manage PodGroup CRs for gang scheduling — analogous to the gang-RBAC roles
+# Volcano/YuniKorn publish, so bundles do not reinvent the rules. Shipped WITHOUT a
+# binding: the operator owns its own (Cluster)RoleBinding to this role in its
+# namespace. Setting the `arenadata.io/pod-group` annotation needs no extra RBAC —
+# the operator already holds pod-create in its namespace (annotations are part of
+# the PodSpec it owns).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ad-scheduler:podgroup-editor
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["scheduling.arenadata.io"]
+    resources: ["podgroups"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["scheduling.arenadata.io"]
+    resources: ["podgroups/status"]
+    verbs: ["get", "list", "watch"]

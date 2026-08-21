@@ -1,0 +1,140 @@
+# ad-scheduler Deployment (M2). Process settings (scheduler name, node pool)
+# come from AD_* env (decision q29); the queue tree is CRD-only. The embedded
+# KubeSchedulerConfiguration wires AdCapacity into preFilter/filter/reserve/
+# postBind. NodeResourcesFit stays enabled for node-level fit; AdCapacity owns
+# queue headroom + off-pool + reservations.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ad-scheduler-config
+  namespace: ad-system
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    # The scheduler's own API client is throttled by these; the defaults (50/100)
+    # cap binding at ~25 pods/s regardless of hardware. Raise for scale.
+    clientConnection:
+      qps: 1000
+      burst: 2000
+    leaderElection:
+      leaderElect: true
+      resourceName: ad-scheduler
+      resourceNamespace: ad-system
+    profiles:
+      - schedulerName: ad-scheduler
+        plugins:
+          queueSort:
+            enabled:
+              - name: AdQueueSort
+            disabled:
+              - name: "*"
+          preEnqueue:
+            enabled:
+              - name: AdGang
+          preFilter:
+            enabled:
+              - name: AdCapacity
+          filter:
+            enabled:
+              - name: AdCapacity
+          reserve:
+            enabled:
+              - name: AdCapacity
+          permit:
+            enabled:
+              - name: AdGang
+          preBind:
+            enabled:
+              - name: AdCapacity
+          postBind:
+            enabled:
+              - name: AdCapacity
+          postFilter:
+            # AdCapacity owns node-level preemption (queue-guarantee-aware). The
+            # in-tree DefaultPreemption is pool-unaware and pure-priority, so it
+            # is disabled in this profile.
+            enabled:
+              - name: AdCapacity
+            disabled:
+              - name: DefaultPreemption
+          score:
+            # DRF dominant-utilisation node scoring (AD_NODE_SORT_POLICY:
+            # spread|binpacking), alongside the in-tree NodeResourcesFit score.
+            enabled:
+              - name: AdCapacity
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ad-scheduler
+  namespace: ad-system
+  labels: { app: ad-scheduler }
+spec:
+  # 1 for dev; >1 is HA-validated on kind (3 replicas, leader election + ~5s
+  # failover of both the scheduler and reconciler leases). Self-signed serving
+  # certs suffice for HA — a real cert is only needed for verified external access
+  # to the metrics/healthz endpoints, not for leader election.
+  replicas: 1
+  selector:
+    matchLabels: { app: ad-scheduler }
+  template:
+    metadata:
+      labels: { app: ad-scheduler }
+    spec:
+      serviceAccountName: ad-scheduler
+      # The scheduler runs on the control plane; tolerate its taint so it can be
+      # placed in this single-node dev cluster.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: ad-scheduler
+          image: localhost:5001/ad-scheduler:dev
+          # image is pushed to the local registry (localhost:5001) and also
+          # available in-node via `kind load`; IfNotPresent uses the node copy.
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/ad-scheduler/config.yaml
+            - -v=2
+          ports:
+            - name: debug
+              containerPort: 8089 # /statedump + /metrics (introspection)
+          env:
+            - name: AD_SCHEDULER_NAME
+              value: ad-scheduler
+            - name: AD_NODE_POOL_LABEL_SELECTOR
+              value: scheduler.arenadata.io/name=ad-scheduler
+            - name: AD_NODE_POOL_TAINT_KEY
+              value: scheduler.arenadata.io/dedicated
+            # Grace before node-level preemption evicts for a newly-pending pod
+            # (lets a transient burst clear first). Default 2s.
+            - name: AD_RESERVATION_DELAY
+              value: "2s"
+            # Publish aggregate node demand for admitted-but-unplaceable gangs as
+            # Cluster-Autoscaler ProvisioningRequests (best-effort-atomic), so a
+            # gang gets its N nodes at once. Opt-in — needs the ProvisioningRequest
+            # CRD + CA configured for it.
+            # - name: AD_AUTOSCALE_DEMAND
+            #   value: "true"
+            # Namespace for the reconciler leader-election Lease (HA single-writer).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          livenessProbe:
+            httpGet: { path: /healthz, port: 10259, scheme: HTTPS }
+            initialDelaySeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 10259, scheme: HTTPS }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ad-scheduler
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: ad-scheduler-config

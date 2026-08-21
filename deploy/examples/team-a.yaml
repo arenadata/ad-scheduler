@@ -1,0 +1,40 @@
+# Example tenant onboarding for the e2e smoke test.
+#   namespace team-a, ServiceAccount spark, and a Queue that routes SA "spark"
+#   to leaf root.team-a.main with a small cpu cap so max-cap is observable.
+#   A second leaf (default: true) catches any other SA in the namespace — the
+#   default queue, analogous to a default StorageClass (≤1 per namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark
+  namespace: team-a
+---
+apiVersion: scheduling.arenadata.io/v1alpha1
+kind: Queue
+metadata:
+  name: main
+  namespace: team-a
+spec:
+  # empty parent => child of the synthetic namespace node root.team-a
+  serviceAccounts: ["spark"]
+  submitACL: "team-a"
+  max:
+    cpu: 500m
+---
+apiVersion: scheduling.arenadata.io/v1alpha1
+kind: Queue
+metadata:
+  name: default
+  namespace: team-a
+spec:
+  # the namespace default queue: any SA not matched by another leaf lands here.
+  # Equivalent legacy shorthand: serviceAccounts: ["*"].
+  default: true
+  submitACL: "team-a"
+  max:
+    cpu: 500m

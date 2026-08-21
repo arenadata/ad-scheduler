@@ -1,0 +1,16 @@
+# DoS-gate template (decision / M6): a mandatory count-only ResourceQuota per
+# participating namespace. It caps the NUMBER of objects a tenant can create so a
+# misconfigured or hostile submitter cannot flood the scheduler's unschedulable
+# queue (e.g. with fail-closed unmapped-SA pods) — the compute envelope is a
+# SEPARATE ResourceQuota (see team-a.yaml / the q27 envelope). Provisioning
+# applies one of these per onboarded namespace; tune the caps per tenant.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ad-scheduler-dos-guard
+  namespace: team-a
+spec:
+  hard:
+    count/pods: "200"
+    count/queues.scheduling.arenadata.io: "50"
+    count/podgroups.scheduling.arenadata.io: "50"

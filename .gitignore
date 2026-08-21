@@ -1,0 +1,7 @@
+.idea
+
+# Go build/test artifacts
+/bin/
+*.test
+*.out
+coverage.txt

@@ -1,0 +1,83 @@
+# CRDs for ad-scheduler: Queue (hierarchical queue tree) and PodGroup (gang).
+# Dev-grade schema: spec/status are preserve-unknown-fields objects so the
+# apiserver stores every field the engine reads without a hand-maintained
+# structural schema. The strict structural schema + ValidatingAdmissionPolicy
+# are generated in M6 (decision q27/q22); until then validation is the engine's
+# job (config.Validate, fail-closed).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: queues.scheduling.arenadata.io
+spec:
+  group: scheduling.arenadata.io
+  scope: Namespaced
+  names:
+    kind: Queue
+    listKind: QueueList
+    plural: queues
+    singular: queue
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Path
+          type: string
+          jsonPath: .status.path
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Parent
+          type: string
+          jsonPath: .spec.parent
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: podgroups.scheduling.arenadata.io
+spec:
+  group: scheduling.arenadata.io
+  scope: Namespaced
+  names:
+    kind: PodGroup
+    listKind: PodGroupList
+    plural: podgroups
+    singular: podgroup
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: MinMember
+          type: integer
+          jsonPath: .spec.minMember
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Scheduled
+          type: integer
+          jsonPath: .status.scheduled
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
