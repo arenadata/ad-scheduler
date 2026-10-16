@@ -166,7 +166,7 @@ func (m *QueueManager) build(spec *Spec, parent *Queue) (*Queue, error) {
 		serviceAccounts: append([]string(nil), spec.ServiceAccounts...),
 		defaultLeaf:     spec.Default,
 		maxApplications: spec.MaxApplications,
-		limits:          append([]Limit(nil), spec.Limits...),
+		limits:          cloneLimits(spec.Limits),
 		submitACL:       ParseACL(spec.SubmitACL),
 		adminACL:        ParseACL(spec.AdminACL),
 		fence:           spec.Fence,

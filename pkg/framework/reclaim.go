@@ -128,6 +128,13 @@ func entitledToReclaim(tree *queue.QueueManager, leaf string, need resource.Reso
 // reclaimable budget (used − guaranteed) so eviction never drops a donor below
 // its guarantee (the guaranteed-protection invariant). Pods at or above the
 // starved pod's priority are spared.
+//
+// NOTE: unlike the node-level PostFilter (Capacity.filterPDBProtected), queue-level
+// reclaim does NOT consult PodDisruptionBudgets — victims are evicted via the
+// Eviction API, which itself refuses a PDB-violating eviction (the eviction is
+// then retried on a later reclaim pass), but the victim selection is PDB-blind,
+// so a PDB-protected pod may be chosen and skipped repeatedly. The two preemption
+// paths therefore differ in how eagerly they spare PDB-covered pods.
 func (c *Coordinator) buildVictims(tree *queue.QueueManager, bound []*corev1.Pod, starvedLeaf string, need resource.Resource, starvedPrio int32) ([]queue.Victim, map[string]*corev1.Pod) {
 	// Fence (decision q3): a preemptor at starvedLeaf may only reclaim within the
 	// nearest fence enclosing it — by default its top-level (namespace) subtree,

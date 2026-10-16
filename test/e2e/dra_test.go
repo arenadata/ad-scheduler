@@ -36,6 +36,9 @@ var _ = Describe("ad-scheduler M2/M3 DRA device quota", func() {
 	ctx := context.Background()
 
 	BeforeEach(func() {
+		if envtestMode {
+			Skip("DRA needs kube-controller-manager's ResourceClaim controller (template -> claim), absent under envtest")
+		}
 		if !draSetup(ctx) {
 			Skip("kwok fake node not Ready — install kwok to run the DRA quota spec")
 		}

@@ -158,7 +158,7 @@ type PodGroupSpec struct {
 
 // PodGroupStatus is the observed state of a gang.
 type PodGroupStatus struct {
-	// Phase is Pending|PreScheduling|Scheduling|Scheduled|Running|Failed.
+	// Phase is Pending|Scheduling|Running|Completed|Failed (Completed and Failed are terminal).
 	Phase string `json:"phase,omitempty"`
 	// Admitted latches the quota-CAS admission (decision q1); durable checkpoint.
 	Admitted  bool  `json:"admitted,omitempty"`

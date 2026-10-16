@@ -82,7 +82,9 @@ func (c *Coordinator) recoverGangs(tree *queue.QueueManager) {
 func (c *Coordinator) syncGangStatuses(ctx context.Context) {
 	admitted := c.engine.AdmittedGangs()
 	// Track when each reservation was first seen (the Hard-timeout clock) and drop
-	// timestamps for gangs no longer holding one.
+	// timestamps for gangs no longer holding one. NOTE: the admission time is not
+	// persisted in PodGroup.status, so after a scheduler restart the clock starts
+	// afresh and a gang gets its full Hard timeout again.
 	now := time.Now()
 	c.mu.Lock()
 	for key := range admitted {

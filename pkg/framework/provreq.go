@@ -5,6 +5,7 @@ import (
 	"maps"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,6 +86,9 @@ func (c *Coordinator) syncProvisioningRequests(ctx context.Context) {
 			continue // no unschedulable member to model the ask on
 		}
 		prName := provReqNamePrefix + name
+		// Keep the objects through a transient API error: the gang still wants
+		// them, so GC must not delete and re-create them (create/delete flap).
+		desired[ns+"/"+prName] = true
 		if err := c.ensurePodTemplate(ctx, cs, ns, prName, name, members[0]); err != nil {
 			klog.V(4).ErrorS(err, "ad-scheduler: provreq podtemplate", "gang", key)
 			continue
@@ -94,7 +98,6 @@ func (c *Coordinator) syncProvisioningRequests(ctx context.Context) {
 			continue
 		}
 		c.markMembersConsumeProvReq(ctx, cs, members, prName)
-		desired[ns+"/"+prName] = true
 	}
 
 	c.gcProvisioningRequests(ctx, cs, desired)
@@ -216,6 +219,9 @@ func (c *Coordinator) ensureProvisioningRequest(ctx context.Context, ns, prName,
 		"podTemplateRef": map[string]any{"name": prName},
 		"count":          count,
 	}}
+	if curSets, _, _ := unstructured.NestedSlice(cur.Object, "spec", "podSets"); equality.Semantic.DeepEqual(curSets, podSets) {
+		return nil // already in sync: skip the write (avoids resourceVersion churn)
+	}
 	if err := unstructured.SetNestedSlice(cur.Object, podSets, "spec", "podSets"); err != nil {
 		return err
 	}

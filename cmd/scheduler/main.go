@@ -11,6 +11,9 @@ import (
 	"os"
 
 	"k8s.io/component-base/cli"
+	_ "k8s.io/component-base/logs/json/register"          // --logging-format=json
+	_ "k8s.io/component-base/metrics/prometheus/clientgo" // client-go metrics in /metrics
+	_ "k8s.io/component-base/metrics/prometheus/version"  // version metric in /metrics
 	"k8s.io/kubernetes/cmd/kube-scheduler/app"
 
 	"github.com/arenadata/ad-scheduler/pkg/plugins/capacity"

@@ -98,8 +98,8 @@ func (m *QueueManager) GangHeld(gangID string) resource.Resource {
 
 // WoundWaitKey is the ordering key for head-of-line gang admission (decision q4):
 // among gangs waiting on the same leaf, the winner is chosen lexicographically by
-// (EffectivePriority DESC, Age ASC, UID ASC) — higher priority first, then the
-// older gang (larger Age), then a stable UID tiebreak. Modelling Age as a
+// (EffectivePriority DESC, Age DESC, UID ASC) — higher priority first, then the
+// older gang (larger Age sorts first), then a stable UID tiebreak. Modelling Age as a
 // monotonic counter (or nanoseconds waited) keeps the comparison pure and free of
 // wall-clock reads.
 type WoundWaitKey struct {

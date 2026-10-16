@@ -28,25 +28,36 @@ var _ fwk.QueueSortPlugin = (*QueueSort)(nil)
 // Name returns the plugin name.
 func (*QueueSort) Name() string { return Name }
 
-// Less reports whether pod a should be attempted before pod b.
-func (*QueueSort) Less(a, b fwk.QueuedPodInfo) bool {
+// Less reports whether entity a should be attempted before entity b. Entities are
+// single pods or pod groups (QueuedEntityInfo).
+func (*QueueSort) Less(a, b fwk.QueuedEntityInfo) bool {
 	return queue.Less(queue.SortFIFO, toOrder(a), toOrder(b))
 }
 
-// toOrder projects a queued pod onto the engine's ordering read-model. Fair
+// toOrder projects a queued entity onto the engine's ordering read-model. Fair
 // (DRF) share is a per-queue-descent concern, not the flat global QueueSort, so
 // it is left zero here; the global order is priority-desc + enqueue-time-asc.
-func toOrder(qpi fwk.QueuedPodInfo) queue.AppOrder {
-	pod := qpi.GetPodInfo().GetPod()
-	var prio int32
-	if pod.Spec.Priority != nil {
-		prio = *pod.Spec.Priority
-	}
+func toOrder(e fwk.QueuedEntityInfo) queue.AppOrder {
 	return queue.AppOrder{
-		Priority:    prio,
-		SubmitNanos: qpi.GetTimestamp().UnixNano(),
-		UID:         string(pod.UID),
+		Priority:    e.GetPriority(),
+		SubmitNanos: e.GetTimestamp().UnixNano(),
+		UID:         entityID(e),
 	}
+}
+
+// entityID is the stable tiebreak key: the pod UID for a single pod, the group
+// key for a pod group. The concrete queue types live in k8s.io/kubernetes, so
+// they are matched structurally.
+func entityID(e fwk.QueuedEntityInfo) string {
+	switch v := e.(type) {
+	case interface{ GetPodInfo() fwk.PodInfo }:
+		if pi := v.GetPodInfo(); pi != nil && pi.GetPod() != nil {
+			return string(pi.GetPod().UID)
+		}
+	case interface{ GetKey() string }:
+		return string(e.Type()) + "/" + v.GetKey()
+	}
+	return ""
 }
 
 // New is the PluginFactory registered via app.WithPlugin.

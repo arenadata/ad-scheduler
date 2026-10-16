@@ -2,15 +2,20 @@
 // (kind) through client-go and asserts the scheduler's observable behaviour —
 // placement, queue max-cap, off-pool rejection, fail-closed, lifecycle release.
 //
-// Run against the current kubeconfig context (kind-kind by default):
+// By default it runs on envtest (a local kube-apiserver + etcd from
+// setup-envtest) and starts everything else itself — see envtest_test.go:
 //
-//	go test ./test/e2e/... -timeout 10m
-//	# or: ginkgo -v ./test/e2e
+//	make e2e
+//
+// With USE_EXISTING_CLUSTER=true it runs against the current kubeconfig context
+// instead (kind), which must already have the scheduler Deployment, CRDs, RBAC
+// and admission policies applied and the pool label on the worker nodes:
+//
+//	make e2e-cluster
 //
 // The suite is hermetic: BeforeSuite ensures the tenant (namespace team-a, SA
 // spark, Queue main) exists and cleans test pods between specs, so it is safe to
-// re-run. It assumes the scheduler Deployment, CRDs and RBAC are already applied
-// and the pool label is on the worker nodes.
+// re-run.
 package e2e
 
 import (
@@ -29,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -59,23 +63,30 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
-	Expect(err).NotTo(HaveOccurred(), "load kubeconfig (is a cluster reachable?)")
+	startTestEnv()
+	cfg := testEnv.Config
+	var err error
 	k8s, err = kubernetes.NewForConfig(cfg)
 	Expect(err).NotTo(HaveOccurred())
 	dyn, err = dynamic.NewForConfig(cfg)
 	Expect(err).NotTo(HaveOccurred())
 
 	ctx := context.Background()
+	if envtestMode {
+		bootstrapEnvtest(ctx)
+	}
 	ensureNamespace(ctx, tenantNS)
 	ensureServiceAccount(ctx, tenantNS, tenantSA)
 	ensureQueue(ctx, tenantNS, "main", tenantSA, "500m")
 
-	// the scheduler must be Ready before we assert on its decisions.
-	Eventually(func() bool { return schedulerReady(ctx) }, 90*time.Second, 2*time.Second).
-		Should(BeTrue(), "ad-scheduler Deployment did not become Ready")
+	if !envtestMode {
+		// the scheduler must be Ready before we assert on its decisions.
+		Eventually(func() bool { return schedulerReady(ctx) }, 90*time.Second, 2*time.Second).
+			Should(BeTrue(), "ad-scheduler Deployment did not become Ready")
+	}
 })
+
+var _ = AfterSuite(stopTestEnv)
 
 func schedulerReady(ctx context.Context) bool {
 	d, err := k8s.AppsV1().Deployments("ad-system").Get(ctx, "ad-scheduler", metav1.GetOptions{})

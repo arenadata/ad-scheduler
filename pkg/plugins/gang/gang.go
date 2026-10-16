@@ -162,6 +162,13 @@ func gangPriority(pod *v1.Pod) int32 {
 
 // Permit holds an admitted member until minMember members are simultaneously
 // assumed, then releases the whole gang.
+//
+// Known limitation: the barrier counts only members currently waiting in the
+// framework (no persistent registry). If a waiting member has already been
+// rejected by its Permit timeout, w.Allow() on it is a no-op, so in a narrow
+// window the remaining N-1 members proceed while the timed-out one is requeued —
+// all-or-nothing is best-effort at the barrier (the admission reservation and the
+// PodGroup Hard timeout remain the backstop).
 func (g *Gang) Permit(_ context.Context, _ fwk.CycleState, pod *v1.Pod, _ string) (*fwk.Status, time.Duration) {
 	key, name, member := gangKey(pod)
 	if !member {

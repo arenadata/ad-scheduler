@@ -1,0 +1,46 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # fmt-check, vet, build, unit tests and the race detector (see `make ci`).
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make ci
+
+  # End-to-end suite on envtest (local kube-apiserver + etcd, no cluster needed).
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/kubebuilder-envtest
+          key: envtest-${{ runner.os }}-${{ hashFiles('Makefile') }}
+      - run: make e2e E2E_TIMEOUT=15m
+      - name: Upload scheduler log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ad-scheduler-logs
+          path: ${{ runner.temp }}/ad-e2e-*/ad-scheduler.log
+          if-no-files-found: ignore

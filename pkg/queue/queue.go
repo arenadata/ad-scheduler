@@ -59,7 +59,24 @@ type Queue struct {
 func (q *Queue) MaxApplications() int32 { return q.maxApplications }
 
 // Limits returns the leaf's per-SA-group sub-caps (copy).
-func (q *Queue) Limits() []Limit { return append([]Limit(nil), q.limits...) }
+func (q *Queue) Limits() []Limit { return cloneLimits(q.limits) }
+
+// cloneLimits deep-copies a Limit slice, including each entry's ServiceAccounts
+// and MaxResources, so callers can never alias the tree's internal state.
+func cloneLimits(in []Limit) []Limit {
+	if in == nil {
+		return nil
+	}
+	out := make([]Limit, len(in))
+	for i, l := range in {
+		out[i] = Limit{
+			ServiceAccounts: append([]string(nil), l.ServiceAccounts...),
+			MaxApplications: l.MaxApplications,
+			MaxResources:    l.MaxResources.Clone(),
+		}
+	}
+	return out
+}
 
 // ServiceAccounts returns the SA routing list for this (leaf) queue.
 func (q *Queue) ServiceAccounts() []string { return append([]string(nil), q.serviceAccounts...) }
@@ -101,10 +118,10 @@ func (q *Queue) isFence() bool { return q.fence || q.isTopLevel() }
 func (q *Queue) IsFence() bool { return q.isFence() }
 
 // fenceBoundary returns the nearest fenced ancestor of this queue (inclusive of
-// the queue itself) — the top-most queue a preemptor at this leaf may reach for
-// victims. Because top-level queues are always fences, the walk terminates at the
-// top-level node at the latest; root is returned only for a queue hung directly
-// off root.
+// the queue itself) — the nearest (deepest) enclosing fence, which bounds the
+// subtree a preemptor at this leaf may reach for victims. Because top-level
+// queues are always fences, the walk terminates at the top-level node at the
+// latest (a top-level queue is itself a fence and is returned as-is).
 func (q *Queue) fenceBoundary() *Queue {
 	last := q
 	for n := q; n != nil; n = n.parent {
